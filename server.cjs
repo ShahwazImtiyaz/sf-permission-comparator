@@ -33,7 +33,7 @@ function writeOAuthConfig(data) {
 function isSafeInstanceUrl(raw) {
   try {
     const u = new URL(decodeURIComponent(raw));
-    return u.protocol === 'https:' && /^[a-z0-9][a-z0-9\-]*\.salesforce\.com$/.test(u.hostname);
+    return u.protocol === 'https:' && /^([a-z0-9][a-z0-9-]*\.)+salesforce\.com$/.test(u.hostname);
   } catch { return false; }
 }
 
@@ -448,6 +448,41 @@ app.get('/api/analytics', async (req, res) => {
   try {
     const data = await sfGet(`${target}${decodedPath}`, token);
     res.json(data);
+  } catch (e) { res.status(500).json({ error: safeMsg(e) }); }
+});
+
+// ── AI Agent endpoint (uses local Claude CLI) ─────────────────────────────────
+const CLAUDE_BIN = (() => {
+  const candidates = [
+    process.env.CLAUDE_BIN,
+    path.join(os.homedir(), '.local/bin/claude'),
+    '/usr/local/bin/claude',
+  ].filter(Boolean);
+  for (const p of candidates) { try { if (fs.existsSync(p)) return p; } catch {} }
+  return 'claude'; // fallback: rely on PATH
+})();
+
+app.post('/api/agent', express.json({ limit: '2mb' }), async (req, res) => {
+  if (!checkRateLimit(req.ip, 20)) return res.status(429).json({ error: 'Too many requests' });
+  const { prompt, context } = req.body || {};
+  if (!prompt || typeof prompt !== 'string' || prompt.length > 2000) {
+    return res.status(400).json({ error: 'Invalid prompt' });
+  }
+
+  const systemPrefix = `You are a Salesforce permissions expert embedded in the SF Permission Comparator app. The context below contains ONLY the permission data relevant to the user's question — do not ask for more data. Answer the specific question asked, nothing else. Be direct and concise: compare only what was asked, name each user, and state clearly who has it and who does not. Keep the answer under 5 sentences unless a list is truly necessary. Use plain text only — no markdown, no dashes, no bullet symbols.`;
+
+  const fullPrompt = context
+    ? `${systemPrefix}\n\nCurrent permission data:\n${JSON.stringify(context, null, 2)}\n\nQuestion: ${prompt}`
+    : `${systemPrefix}\n\nQuestion: ${prompt}`;
+
+  try {
+    const answer = await new Promise((resolve, reject) => {
+      const child = execFile(CLAUDE_BIN, ['-p', fullPrompt], { timeout: 60000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+        if (err) return reject(new Error(stderr?.trim() || err.message));
+        resolve(stdout.trim());
+      });
+    });
+    res.json({ answer });
   } catch (e) { res.status(500).json({ error: safeMsg(e) }); }
 });
 

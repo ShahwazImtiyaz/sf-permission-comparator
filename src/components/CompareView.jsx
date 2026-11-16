@@ -9,6 +9,7 @@ import AccessTab from './AccessTab';
 import ReportsDashboardsTab from './ReportsDashboardsTab';
 import LayoutsTypesTab from './LayoutsTypesTab';
 import FilterBar from './FilterBar';
+import AgentChat from './AgentChat';
 
 const MAX_USERS = 5;
 
@@ -661,6 +662,8 @@ export default function CompareView({ onLogout }) {
           </div>
         )}
       </div>
+
+      <AgentChat users={comparedUsers} datas={datas} />
     </div>
   );
 }
