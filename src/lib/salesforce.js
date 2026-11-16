@@ -1,3 +1,7 @@
+function isSalesforceId(id) {
+  return typeof id === 'string' && /^[a-zA-Z0-9]{15,18}$/.test(id);
+}
+
 export function getSession() {
   return {
     token: sessionStorage.getItem('sf_access_token'),
@@ -175,6 +179,7 @@ export async function searchUsers(term, signal) {
 
 // ── Per-user data ────────────────────────────────────────────────────────────
 export async function getUserData(userId) {
+  if (!isSalesforceId(userId)) throw new Error('Invalid user ID');
   const permSets = await soql(
     `SELECT PermissionSetId, PermissionSet.Name, PermissionSet.Label, ` +
     `PermissionSet.IsCustom, PermissionSet.IsOwnedByProfile ` +
@@ -242,6 +247,7 @@ export async function getProfilePermissions(profileId, fields) {
   // Query Profile-only fields (those that don't exist on PermissionSet)
   const profileOnlyFields = fields.filter(f => f.profile && !f.permset);
   if (!profileId || !profileOnlyFields.length) return {};
+  if (!isSalesforceId(profileId)) return {};
 
   const F_BATCH = 100;
   const batches = [];
@@ -525,13 +531,13 @@ export async function getFolderAccess(userId) {
     // takes precedence over any lower explicit share level.
     if (f.Type === 'Report' && canManageReports) return { ...f, AccessLevel: 'Manage' };
     if (f.Type === 'Dashboard' && canManageDashboards) return { ...f, AccessLevel: 'Manage' };
-    return { ...f, AccessLevel: explicit || 'View' };
+    return { ...f, AccessLevel: explicit || 'None' };
   });
 }
 
 // ── Record types (profile-based, Tooling API) ─────────────────────────────────
 export async function getRecordTypeVisibility(profileId) {
-  if (!profileId) return [];
+  if (!profileId || !isSalesforceId(profileId)) return [];
   return tooling(
     `SELECT RecordTypeId, IsDefault, IsPersonAccountDefault, IsVisible, RecordType.Name, RecordType.SobjectType ` +
     `FROM ProfileRecordTypeVisibility WHERE Profile.Id = '${profileId}'`
@@ -543,7 +549,7 @@ export async function getRecordTypeVisibility(profileId) {
 
 // ── Page layouts (profile-based, Tooling API) ─────────────────────────────────
 export async function getProfileLayouts(profileId) {
-  if (!profileId) return [];
+  if (!profileId || !isSalesforceId(profileId)) return [];
   const layouts = await tooling(
     `SELECT LayoutId, Layout.Name, RecordTypeId, RecordType.Name, RecordType.SobjectType, TableEnumOrId ` +
     `FROM ProfileLayout WHERE ProfileId = '${profileId}'`
@@ -600,7 +606,7 @@ export async function getProfileLayouts(profileId) {
 
 // ── Lightning record pages (FlexiPage assignments, Tooling API) ───────────────
 export async function getFlexiPageAssignments(profileId) {
-  if (!profileId) return [];
+  if (!profileId || !isSalesforceId(profileId)) return [];
   return tooling(
     `SELECT Id, FlexiPageId, FlexiPage.MasterLabel, FlexiPage.EntityDefinitionId, FlexiPage.PageType ` +
     `FROM FlexiPageAssignment WHERE ProfileId = '${profileId}'`

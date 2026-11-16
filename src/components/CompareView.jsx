@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import UserPicker from './UserPicker';
-import { getUserData, getObjectPermissions, clearSession, getOrgDomain, setSession, fetchOrgInfo, setOrgName } from '../lib/salesforce';
+import { getUserData, getObjectPermissions, clearSession, getOrgDomain, setSession, loadOrgSession, fetchOrgInfo, setOrgName } from '../lib/salesforce';
 import { SLOT_COLORS, SLOT_LABELS } from '../lib/slotColors';
 import { isDiff, Check } from '../lib/utils';
 import SystemPermsTab from './SystemPermsTab';
@@ -314,22 +314,15 @@ function OrgSwitcher({ orgDomain, onSwitch }) {
     setSwitching(true);
     setOpen(false);
     try {
-      if (org.source === 'chrome') {
-        setSession(org.accessToken, org.instanceUrl);
-      } else {
-        const r = await fetch('/api/org-session', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username: org.username || org.id }),
-        });
-        const d = await r.json();
-        if (!r.ok) throw new Error(d.error || 'Could not load session');
-        setSession(d.accessToken, d.instanceUrl);
-      }
+      const { accessToken, instanceUrl } = await loadOrgSession(org);
+      setSession(accessToken, instanceUrl);
       localStorage.setItem('sf_last_org_id', org.id);
       try { const info = await fetchOrgInfo(); if (info?.Name) setOrgName(info.Name); } catch {}
       onSwitch();
-    } catch {}
+    } catch (e) {
+      console.error('Org switch failed:', e);
+      setSwitching(false);
+    }
     setSwitching(false);
   }
 

@@ -24,7 +24,8 @@ export default function Login({ onSuccess, initialError }) {
     fetchOrgs()
       .then(data => {
         setOrgs(data);
-        const lastId = localStorage.getItem('sf_last_org_id');
+        const lastTs = Number(localStorage.getItem('sf_last_org_ts') || '0');
+        const lastId = (Date.now() - lastTs < 86_400_000) ? localStorage.getItem('sf_last_org_id') : null;
         const chromeOrgs = data.filter(o => o.source === 'chrome');
         // Most recent Chrome tab (last in list) or last-used org
         const preselect =
@@ -48,6 +49,7 @@ export default function Login({ onSuccess, initialError }) {
       const { accessToken, instanceUrl } = await loadOrgSession(org);
       setSession(accessToken, instanceUrl);
       localStorage.setItem('sf_last_org_id', org.id);
+      localStorage.setItem('sf_last_org_ts', String(Date.now()));
       onSuccess();
       fetchOrgInfo().then(o => { if (o?.Name) setOrgName(o.Name); }).catch(() => {});
     } catch (e) {

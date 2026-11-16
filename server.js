@@ -25,11 +25,9 @@ function execFileAsync(file, args, opts) {
 }
 import { detectOrgSessions } from './chrome-session.js';
 
-// ── OAuth PKCE in-memory stores (cleared on restart — acceptable for short-lived codes) ──
-const pkceStore = new Map();    // state → { codeVerifier, redirectUri, loginHost, expires }
-const authCodeStore = new Map(); // tempCode → { accessToken, instanceUrl, expires }
-
-// Evict expired entries every 5 minutes so the maps don't grow unboundedly
+// ── OAuth PKCE in-memory stores ───────────────────────────────────────────────
+const pkceStore = new Map();
+const authCodeStore = new Map();
 setInterval(() => {
   const now = Date.now();
   for (const [k, v] of pkceStore) if (v.expires < now) pkceStore.delete(k);
@@ -45,14 +43,55 @@ function readOAuthConfig() {
 function writeOAuthConfig(data) {
   const dir = path.join(os.homedir(), '.sf-comparator');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(getOAuthConfigPath(), JSON.stringify(data, null, 2));
+  fs.writeFileSync(getOAuthConfigPath(), JSON.stringify(data, null, 2), { mode: 0o600 });
 }
+
+// ── Security helpers ──────────────────────────────────────────────────────────
+function isSafeInstanceUrl(raw) {
+  try {
+    const u = new URL(decodeURIComponent(raw));
+    return u.protocol === 'https:' && /^[a-z0-9][a-z0-9\-]*\.salesforce\.com$/.test(u.hostname);
+  } catch { return false; }
+}
+
+function safeMsg(e) {
+  console.error('[server error]', e);
+  const msg = e?.message || '';
+  if (msg.length < 300 && !msg.includes('/') && !msg.includes('\\') && !msg.includes('~')) return msg;
+  return 'Internal server error';
+}
+
+// Simple per-IP rate limiter
+const _rateLimits = new Map();
+function checkRateLimit(ip, maxPerMinute = 10) {
+  const now = Date.now();
+  const entry = _rateLimits.get(ip) || { count: 0, start: now };
+  if (now - entry.start > 60_000) { entry.count = 0; entry.start = now; }
+  entry.count++;
+  _rateLimits.set(ip, entry);
+  return entry.count <= maxPerMinute;
+}
+setInterval(() => {
+  const cutoff = Date.now() - 120_000;
+  for (const [k, v] of _rateLimits) if (v.start < cutoff) _rateLimits.delete(k);
+}, 5 * 60 * 1000).unref();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(express.json());
 
-// CSRF protection: reject cross-origin mutating requests from other origins
+// ── Security headers ──────────────────────────────────────────────────────────
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Referrer-Policy', 'same-origin');
+  res.setHeader('Content-Security-Policy',
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'");
+  next();
+});
+
+// ── CSRF protection ───────────────────────────────────────────────────────────
 app.use((req, res, next) => {
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
     const origin = req.headers.origin;
@@ -124,8 +163,17 @@ app.get('/api/orgs', async (_req, res) => {
 app.post('/api/org-session', async (req, res) => {
   const { username } = req.body;
   if (!username) return res.status(400).json({ error: 'username required' });
-  // Strict allowlist: Salesforce usernames are email-like with optional .sandbox suffix
   if (!/^[a-zA-Z0-9@._+\-]+$/.test(username)) {
+    return res.status(400).json({ error: 'Invalid username format' });
+  }
+  // Prevent path traversal: username must not contain path separators when used as filename
+  const baseUsername = path.basename(username);
+  if (baseUsername !== username) {
+    return res.status(400).json({ error: 'Invalid username format' });
+  }
+  const sfdxDir = getSfdxDir();
+  const authFilePath = path.resolve(sfdxDir, `${username}.json`);
+  if (!authFilePath.startsWith(sfdxDir + path.sep) && authFilePath !== path.join(sfdxDir, `${username}.json`)) {
     return res.status(400).json({ error: 'Invalid username format' });
   }
   try {
@@ -135,41 +183,24 @@ app.post('/api/org-session', async (req, res) => {
     );
     const token = JSON.parse(raw)?.result?.accessToken;
     if (!token) return res.status(500).json({ error: 'Could not retrieve token. Try: sf org login web' });
-    const fileData = JSON.parse(fs.readFileSync(path.join(getSfdxDir(), `${username}.json`), 'utf8'));
+    const fileData = JSON.parse(fs.readFileSync(authFilePath, 'utf8'));
     res.json({ accessToken: token, instanceUrl: fileData.instanceUrl });
   } catch (e) {
-    res.status(500).json({ error: `Session error: ${e.message}` });
+    res.status(500).json({ error: safeMsg(e) });
   }
 });
-
-function getOpenChromeTabs() {
-  try {
-    const out = execSync(
-      `osascript -e 'tell application "Google Chrome" to return URL of every tab of every window'`,
-      { encoding: 'utf8', timeout: 3000 }
-    );
-    return out.split(',').map(u => u.trim().toLowerCase());
-  } catch { return null; }
-}
 
 app.get('/api/chrome-orgs', async (_req, res) => {
   try {
     const sessions = detectOrgSessions();
-    const openTabs = getOpenChromeTabs(); // null = can't check (skip tab filter)
-    // Filter by open Chrome tab only — no REST API validation call.
-    // Making a live API call with the browser's sid cookie can trigger Salesforce
-    // session security (IP-locked or high-assurance sessions) and log the user
-    // out of their browser session.
-    const result = sessions
-      .filter(s => openTabs === null || openTabs.some(url =>
-        url.includes(s.apiHost) ||      // matches .my.salesforce.com tabs
-        url.includes(`${s.label}.`)     // matches .lightning.force.com, -setup.com, etc.
-      ))
-      .map(s => ({
-        source: 'chrome', id: s.apiHost,
-        label: s.label, instanceUrl: s.instanceUrl,
-        profile: s.profile, accessToken: s.sessionId,
-      }));
+    // Return metadata only — no accessToken. Tokens are fetched on-demand via /api/chrome-session.
+    const result = sessions.map(s => ({
+      source: 'chrome',
+      id: s.apiHost,
+      label: s.label,
+      instanceUrl: s.instanceUrl,
+      profile: s.profile,
+    }));
     res.json(result);
   } catch { res.json([]); }
 });
@@ -183,7 +214,7 @@ app.get('/api/chrome-session', (_req, res) => {
     if (!s) return res.status(404).json({ error: `No Chrome session found for ${apiHost}. Make sure you are logged in to this org in Chrome.` });
     res.json({ accessToken: s.sessionId, instanceUrl: s.instanceUrl });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeMsg(e) });
   }
 });
 
@@ -191,6 +222,7 @@ app.get('/api/perm-fields', async (req, res) => {
   const token = req.headers['x-sf-token'];
   const { instanceUrl } = req.query;
   if (!token || !instanceUrl) return res.status(400).json({ error: 'Missing params' });
+  if (!isSafeInstanceUrl(instanceUrl)) return res.status(400).json({ error: 'Invalid instanceUrl' });
   try {
     const base = decodeURIComponent(instanceUrl);
     const [psData, profileData] = await Promise.all([
@@ -213,62 +245,84 @@ app.get('/api/perm-fields', async (req, res) => {
     }
     fields.sort((a, b) => a.label.localeCompare(b.label));
     res.json(fields);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: safeMsg(e) }); }
 });
 
 app.get('/api/query', async (req, res) => {
   const { q, instanceUrl, nextUrl } = req.query;
   const token = req.headers['x-sf-token'];
   if (!token || !instanceUrl) return res.status(400).json({ error: 'Missing token or instanceUrl' });
+  if (!isSafeInstanceUrl(instanceUrl)) return res.status(400).json({ error: 'Invalid instanceUrl' });
+  if (nextUrl) {
+    const decoded = decodeURIComponent(nextUrl);
+    if (!decoded.startsWith('/services/')) return res.status(400).json({ error: 'Invalid nextUrl' });
+  }
   const target = decodeURIComponent(instanceUrl);
   const apiPath = nextUrl ? decodeURIComponent(nextUrl) : `/services/data/v60.0/query?q=${encodeURIComponent(q)}`;
   try { res.json(await sfGet(target + apiPath, token)); }
-  catch (e) { res.status(500).json({ error: e.message }); }
+  catch (e) { res.status(500).json({ error: safeMsg(e) }); }
 });
 
 app.get('/api/search', async (req, res) => {
   const { q, instanceUrl } = req.query;
   const token = req.headers['x-sf-token'];
   if (!token || !instanceUrl || !q) return res.status(400).json({ error: 'Missing params' });
+  if (!isSafeInstanceUrl(instanceUrl)) return res.status(400).json({ error: 'Invalid instanceUrl' });
   const target = decodeURIComponent(instanceUrl);
   try { res.json(await sfGet(`${target}/services/data/v60.0/search?q=${encodeURIComponent(q)}`, token)); }
-  catch (e) { res.status(500).json({ error: e.message }); }
+  catch (e) { res.status(500).json({ error: safeMsg(e) }); }
 });
 
 app.get('/api/tooling-query', async (req, res) => {
   const { q, instanceUrl, nextUrl } = req.query;
   const token = req.headers['x-sf-token'];
   if (!token || !instanceUrl) return res.status(400).json({ error: 'Missing params' });
+  if (!isSafeInstanceUrl(instanceUrl)) return res.status(400).json({ error: 'Invalid instanceUrl' });
+  if (nextUrl) {
+    const decoded = decodeURIComponent(nextUrl);
+    if (!decoded.startsWith('/services/')) return res.status(400).json({ error: 'Invalid nextUrl' });
+  }
   const target = decodeURIComponent(instanceUrl);
   const apiPath = nextUrl ? decodeURIComponent(nextUrl) : `/services/data/v60.0/tooling/query?q=${encodeURIComponent(q)}`;
   try { res.json(await sfGet(target + apiPath, token)); }
-  catch (e) { res.status(500).json({ error: e.message }); }
+  catch (e) { res.status(500).json({ error: safeMsg(e) }); }
 });
 
 app.get('/api/analytics', async (req, res) => {
   const { path: apiPath, instanceUrl } = req.query;
   const token = req.headers['x-sf-token'];
   if (!token || !instanceUrl || !apiPath) return res.status(400).json({ error: 'Missing params' });
+  if (!isSafeInstanceUrl(instanceUrl)) return res.status(400).json({ error: 'Invalid instanceUrl' });
+  const decodedPath = decodeURIComponent(apiPath);
+  if (!decodedPath.startsWith('/services/')) return res.status(400).json({ error: 'Invalid path' });
   const target = decodeURIComponent(instanceUrl);
-  try { res.json(await sfGet(`${target}${decodeURIComponent(apiPath)}`, token)); }
-  catch (e) { res.status(500).json({ error: e.message }); }
+  try { res.json(await sfGet(`${target}${decodedPath}`, token)); }
+  catch (e) { res.status(500).json({ error: safeMsg(e) }); }
 });
 
-// ── Pinned session — server owner shares their active session with remote users ─
-let pinnedSession = null; // { accessToken, instanceUrl }
-let pinnedToken = null;   // random token required to retrieve the pinned session
+// ── Pinned session ────────────────────────────────────────────────────────────
+let pinnedSession = null;
+let pinnedToken = null;
+let pinnedExpires = 0;
+const PINNED_TTL_MS = 30 * 60 * 1000;
 
 app.post('/api/pin-session', (req, res) => {
   const { accessToken, instanceUrl } = req.body;
   if (!accessToken || !instanceUrl) return res.status(400).json({ error: 'Missing fields' });
+  if (!isSafeInstanceUrl(instanceUrl)) return res.status(400).json({ error: 'Invalid instanceUrl' });
   pinnedSession = { accessToken, instanceUrl };
   pinnedToken = crypto.randomBytes(16).toString('hex');
-  // Return the token so the caller can share it with remote users
-  res.json({ ok: true, token: pinnedToken });
+  pinnedExpires = Date.now() + PINNED_TTL_MS;
+  res.json({ ok: true, token: pinnedToken, expiresIn: PINNED_TTL_MS / 1000 });
 });
 
 app.get('/api/pinned-session', (req, res) => {
-  if (!pinnedSession) return res.status(404).json({ error: 'No session pinned yet' });
+  const ip = req.socket.remoteAddress || 'unknown';
+  if (!checkRateLimit(ip, 10)) return res.status(429).json({ error: 'Too many requests' });
+  if (!pinnedSession || Date.now() > pinnedExpires) {
+    pinnedSession = null; pinnedToken = null;
+    return res.status(404).json({ error: 'No active pinned session' });
+  }
   const provided = req.query.token || req.headers['x-pin-token'];
   if (!provided || provided !== pinnedToken) {
     return res.status(401).json({ error: 'Unauthorized: provide ?token= from the pin-session response' });
@@ -346,7 +400,7 @@ app.get('/api/oauth/callback', async (req, res) => {
     });
     res.redirect(`/?auth_code=${tempCode}`);
   } catch (e) {
-    res.redirect(`/?oauth_error=${encodeURIComponent(e.message)}`);
+    res.redirect(`/?oauth_error=${encodeURIComponent(safeMsg(e))}`);
   }
 });
 
@@ -381,8 +435,8 @@ server.on('error', (err) => {
 function sfGet(url, token) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
-    const lib = parsed.protocol === 'https:' ? https : http;
-    const req = lib.request(
+    if (parsed.protocol !== 'https:') return reject(new Error('Only HTTPS connections are allowed'));
+    const req = https.request(
       { hostname: parsed.hostname, path: parsed.pathname + parsed.search,
         method: 'GET', headers: { Authorization: `Bearer ${token}` } },
       res => { let d = ''; res.on('data', c => d += c);

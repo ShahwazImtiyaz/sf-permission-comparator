@@ -2,7 +2,7 @@
 // CJS version of chrome-session.js (for pkg binary bundling)
 // Uses macOS sqlite3 CLI instead of node:sqlite to avoid version constraints.
 
-const { execFileSync, execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const { createDecipheriv, pbkdf2Sync } = require('crypto');
 const { existsSync, mkdtempSync, copyFileSync, rmSync, readdirSync, writeFileSync } = require('fs');
 const { homedir, tmpdir } = require('os');
@@ -68,7 +68,7 @@ function readSidCookies(profileDir) {
   try {
     // Use macOS built-in sqlite3 CLI; output hex blobs for encrypted_value
     const sql = "SELECT host_key, hex(encrypted_value) as ev, last_access_utc FROM cookies WHERE name='sid' AND (host_key LIKE '%salesforce%' OR host_key LIKE '%force.com%') ORDER BY last_access_utc DESC";
-    const out = execSync(`sqlite3 "${tmp}" -separator '|' "${sql}"`, { encoding: 'utf8' });
+    const out = execFileSync('sqlite3', [tmp, '-separator', '|', sql], { encoding: 'utf8' });
     for (const line of out.trim().split('\n')) {
       if (!line.trim()) continue;
       const parts = line.split('|');

@@ -1,5 +1,5 @@
 import { useState, useEffect, Component } from 'react';
-import { getSession, setSession, fetchOrgInfo, setOrgName, clearSession } from './lib/salesforce';
+import { getSession, setSession, loadOrgSession, fetchOrgInfo, setOrgName, clearSession } from './lib/salesforce';
 import Login from './components/Login';
 import CompareView from './components/CompareView';
 
@@ -102,18 +102,8 @@ export default function App() {
         return;
       }
 
-      if (target.source === 'chrome') {
-        setSession(target.accessToken, target.instanceUrl);
-      } else {
-        const r = await fetch('/api/org-session', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username: target.username || target.id }),
-        });
-        const d = await r.json();
-        if (!r.ok) throw new Error(d.error || 'Could not load session');
-        setSession(d.accessToken, d.instanceUrl);
-      }
+      const { accessToken, instanceUrl } = await loadOrgSession(target);
+      setSession(accessToken, instanceUrl);
 
       localStorage.setItem('sf_last_org_id', target.id);
       // Set authed immediately — fetchOrgInfo updates the name in the background.
