@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192">
+  <rect width="192" height="192" rx="32" fill="#0f172a"/>
+  <!-- Cloud -->
+  <path d="M56 120 a28 28 0 0 1 0-56 a20 20 0 0 1 38-8 a24 24 0 1 1 6 47z" fill="#6366f1"/>
+  <!-- Checkmark -->
+  <polyline points="68,110 84,126 116,94" stroke="#a5f3fc" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>

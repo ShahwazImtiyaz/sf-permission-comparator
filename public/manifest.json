@@ -1,0 +1,17 @@
+{
+  "name": "SF Permission Comparator",
+  "short_name": "SF Comparator",
+  "description": "Compare Salesforce user permissions side by side",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
